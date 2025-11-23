@@ -2,12 +2,14 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <WiFiManager.h>      // konfigurační portal
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 
 #include "HX711.h"
+#include <time.h>
 
 // ========================
 // PINY
@@ -18,7 +20,7 @@ const int ENC_SW = 15;
 const int ENC_A  = 17;
 const int ENC_B  = 16;
 
-// LCD (ST7735 na HSPI)
+// LCD (ST7789 na HSPI)
 const int TFT_SCK  = 12;
 const int TFT_MOSI = 11;
 const int TFT_CS   = 10;
@@ -28,16 +30,6 @@ const int TFT_DC   = 7;
 // HX711 – použijeme piny, co máš napsané jako I2C
 const int HX711_DOUT = 8;   // "SDA"
 const int HX711_SCK  = 9;   // "SCL"
-
-// ========================
-// WiFi AP config
-// ========================
-const char *AP_SSID     = "ChytraVaha";
-const char *AP_PASSWORD = "vaha1234";
-
-IPAddress local_ip(192, 168, 4, 1);
-IPAddress gateway(192, 168, 4, 1);
-IPAddress subnet(255, 255, 255, 0);
 
 // ========================
 // Web server
@@ -64,25 +56,55 @@ int  lastEncA        = HIGH;
 bool lastButtonState = HIGH;
 
 // ========================
-// Čas/datum – jednoduchá fake implementace
+// HUD – poslední vykreslené hodnoty
 // ========================
+float lastDrawnWeight = 999999.0f;
+int   lastWifiLevel   = -1;
+String lastTimeStr    = "";
+String lastDateStr    = "";
+
+// barvy
+uint16_t COLOR_BG      = 0x0000; // černá
+uint16_t COLOR_TOPBAR1 = 0x0015; // tmavě modrá
+uint16_t COLOR_TOPBAR2 = 0x025F; // světlejší modrá
+uint16_t COLOR_TEXT    = 0xFFFF; // bílá
+uint16_t COLOR_ACCENT  = 0x07E0; // zelená
+
+// ========================
+// Čas – NTP
+// ========================
+const long  gmtOffset_sec     = 3600;   // +1h
+const int   daylightOffset_sec = 3600;  // další hodina v létě
+
+bool getLocalTimeSafe(struct tm * timeinfo) {
+  if (!getLocalTime(timeinfo)) {
+    return false;
+  }
+  return true;
+}
+
 String getTimeString() {
-  unsigned long seconds = millis() / 1000;
-  uint8_t s = seconds % 60;
-  uint8_t m = (seconds / 60) % 60;
-  uint8_t h = (seconds / 3600) % 24;
+  struct tm timeinfo;
+  if (!getLocalTimeSafe(&timeinfo)) {
+    return "--:--:--";
+  }
   char buf[9];
-  sprintf(buf, "%02u:%02u:%02u", h, m, s);
+  strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
   return String(buf);
 }
 
-// pro teď pevný datum (můžeš si pak nahradit za RTC / NTP)
 String getDateString() {
-  return String("2025-01-01");
+  struct tm timeinfo;
+  if (!getLocalTimeSafe(&timeinfo)) {
+    return "----/--/--";
+  }
+  char buf[11];
+  strftime(buf, sizeof(buf), "%Y-%m-%d", &timeinfo);
+  return String(buf);
 }
 
 // ========================
-// HTML stránka (UI) – PŮVODNÍ, BEZE ZMĚNY
+// HTML UI – původní
 // ========================
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -209,7 +231,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div class="card">
     <div class="header">
       <h1>Chytrá váha</h1>
-      <div class="chip" id="connectionStatus">AP: ChytraVaha</div>
+      <div class="chip" id="connectionStatus">WiFi</div>
     </div>
     <div class="weight-display">
       <div>
@@ -256,7 +278,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         document.getElementById('itemLabel').textContent = data.item || 'Nic';
         document.getElementById('lastUpdate').textContent = 'Naposledy: ' + new Date().toLocaleTimeString();
         document.getElementById('rssiLabel').textContent = 'RSSI: ' + (data.rssi ?? '--') + ' dBm';
-        document.getElementById('connectionStatus').textContent = 'Připojeno k váze';
+        document.getElementById('connectionStatus').textContent = 'WiFi OK';
       } catch (e) {
         document.getElementById('connectionStatus').textContent = 'Chyba spojení…';
       }
@@ -292,30 +314,25 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 // ========================
-// Helper: čtení váhy (bez kalibrace)
+// Váha
 // ========================
 void updateWeightFromScale() {
   if (scale.is_ready()) {
-    // prozatím bez kalibrace – jednotky budou "něco", ale pohne se to :)
-    currentWeight = scale.get_units(1);
+    currentWeight = scale.get_units(1);  // bez kalibrace
   }
 }
 
 // ========================
-// Rotary enkoder – jednoduché čtení
+// Rotary enkoder
 // ========================
 void updateEncoder() {
   int a = digitalRead(ENC_A);
   int b = digitalRead(ENC_B);
 
   if (a != lastEncA) {
-    // na hraně A se podíváme na B a podle toho směr
     if (a == HIGH) {
-      if (b == LOW) {
-        encoderPosition++;
-      } else {
-        encoderPosition--;
-      }
+      if (b == LOW) encoderPosition++;
+      else          encoderPosition--;
     }
     lastEncA = a;
   }
@@ -327,49 +344,196 @@ void updateEncoder() {
 }
 
 // ========================
-// LCD – pomocné vykreslení
+// HUD – statická část
 // ========================
-void drawBootMessage(const char *line1, const char *line2) {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(1);
-  tft.println("Chytra vaha");
-  tft.println("----------------");
-  if (line1) tft.println(line1);
-  if (line2) tft.println(line2);
+void drawTopBarGradient() {
+  // jednoduchý vertikální "glow" gradient
+  for (int y = 0; y < 24; y++) {
+    uint8_t mix = map(y, 0, 23, 0, 255);
+    uint8_t r1 = (COLOR_TOPBAR1 >> 11) & 0x1F;
+    uint8_t g1 = (COLOR_TOPBAR1 >> 5)  & 0x3F;
+    uint8_t b1 = (COLOR_TOPBAR1)       & 0x1F;
+
+    uint8_t r2 = (COLOR_TOPBAR2 >> 11) & 0x1F;
+    uint8_t g2 = (COLOR_TOPBAR2 >> 5)  & 0x3F;
+    uint8_t b2 = (COLOR_TOPBAR2)       & 0x1F;
+
+    uint8_t r = (r1 * (255 - mix) + r2 * mix) / 255;
+    uint8_t g = (g1 * (255 - mix) + g2 * mix) / 255;
+    uint8_t b = (b1 * (255 - mix) + b2 * mix) / 255;
+
+    uint16_t c = (r << 11) | (g << 5) | b;
+    tft.drawFastHLine(0, y, 320, c);
+  }
 }
 
-void drawMainScreen() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(ST77XX_WHITE);
+void drawStaticHUD() {
+  tft.fillScreen(COLOR_BG);
+
+  // top bar
+  drawTopBarGradient();
+
+  // "Chytra vaha" label vlevo nahoře
+  tft.setTextColor(COLOR_TEXT);
   tft.setTextSize(1);
-  tft.println("Chytra vaha");
+  tft.setCursor(4, 6);
+  tft.print("Chytra vaha");
 
-  tft.setCursor(0, 14);
-  tft.print("W: ");
-  tft.print(currentWeight, 1);
-  tft.println(" (raw)");
+  // box na váhu uprostřed (s "glow" okrajem)
+  int boxX = 20;
+  int boxY = 60;
+  int boxW = 280;
+  int boxH = 120;
 
-  tft.setCursor(0, 28);
-  tft.print("Item: ");
-  tft.println(currentItem);
+  uint16_t glowColor = COLOR_TOPBAR2;
+  tft.fillRoundRect(boxX - 4, boxY - 4, boxW + 8, boxH + 8, 14, glowColor);
+  tft.fillRoundRect(boxX, boxY, boxW, boxH, 12, COLOR_BG);
 
-  tft.setCursor(0, 42);
-  tft.print("Enc: ");
+  // label "g"
+  tft.setTextSize(2);
+  tft.setCursor(boxX + boxW - 35, boxY + boxH - 28);
+  tft.setTextColor(COLOR_ACCENT);
+  tft.print("g");
+
+  // spodní status bar (enkoder / stav tlačítka)
+  tft.drawFastHLine(0, 220, 320, COLOR_TOPBAR2);
+}
+
+void eraseWeightArea() {
+  // smažeme jen oblast, kde je číslo
+  int boxX = 20;
+  int boxY = 60;
+  int boxW = 280;
+  int boxH = 120;
+  // uvnitř ještě menší rect pro číslo
+  tft.fillRect(boxX + 10, boxY + 20, boxW - 60, boxH - 40, COLOR_BG);
+}
+
+// ========================
+// HUD – dynamická část
+// ========================
+
+// ikona WiFi podle síly
+void drawWifiIcon(int level) {
+  // úroveň 0–4 (0 = nic, 4 = plný)
+  int x = 260;
+  int y = 5;
+  int barW = 5;
+  int barSpacing = 3;
+
+  // smaž ikonku
+  tft.fillRect(x - 2, 2, 320 - x, 20, COLOR_BG);
+  // malý "glow" pod tím
+  tft.fillRect(x - 2, 20, 40, 2, COLOR_TOPBAR2);
+
+  for (int i = 0; i < 4; i++) {
+    int barH = 4 + i * 3;
+    int bx = x + i * (barW + barSpacing);
+    int by = 20 - barH;
+    uint16_t col = (i < level) ? COLOR_ACCENT : 0x4208; // tlumená šedá
+    tft.fillRect(bx, by, barW, barH, col);
+  }
+}
+
+int wifiLevelFromRSSI(int rssi) {
+  if (rssi == 0) return 0;
+  if (rssi > -55) return 4;
+  if (rssi > -65) return 3;
+  if (rssi > -75) return 2;
+  if (rssi > -85) return 1;
+  return 0;
+}
+
+void updateTopBarHUD() {
+  // čas + datum
+  String timeStr = getTimeString();
+  String dateStr = getDateString();
+
+  if (timeStr != lastTimeStr || dateStr != lastDateStr) {
+    // smažeme střed top baru (pod textem) – necháme gradient pod tím
+    tft.fillRect(110, 4, 130, 18, COLOR_BG);  // malý "průhled" – přes něj text
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_TEXT);
+    tft.setCursor(115, 6);
+    tft.print(timeStr);
+    tft.setCursor(115, 14);
+    tft.print(dateStr);
+
+    lastTimeStr = timeStr;
+    lastDateStr = dateStr;
+  }
+
+  // WiFi síla
+  int rssi = 0;
+  int level = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    rssi = WiFi.RSSI();
+    level = wifiLevelFromRSSI(rssi);
+  } else {
+    level = 0;
+  }
+
+  if (level != lastWifiLevel) {
+    drawWifiIcon(level);
+    lastWifiLevel = level;
+  }
+}
+
+void updateWeightHUD() {
+  // jen když se změnila (trochu)
+  if (fabs(currentWeight - lastDrawnWeight) < 0.05f) {
+    return;
+  }
+
+  eraseWeightArea();
+
+  // velké číslo – tady by šel použít Orbitron jako vlastní font,
+  // pro teď použijeme default s větším textSize
+  tft.setTextColor(COLOR_TEXT);
+  tft.setTextSize(4);
+
+  char buf[16];
+  dtostrf(currentWeight, 0, 1, buf);
+
+  // spočítáme šířku textu nahrubo (4 px * size + mezery)
+  int len = strlen(buf);
+  int charW = 6 * 4; // 6px * size4
+  int totalW = len * charW;
+
+  int boxX = 20;
+  int boxW = 280;
+  int x = boxX + (boxW - totalW) / 2;
+  int y = 90;
+
+  // "glow" – nejdřív tmavší stín
+  tft.setTextColor(COLOR_TOPBAR2);
+  tft.setCursor(x + 2, y + 2);
+  tft.print(buf);
+
+  // pak ostrý text
+  tft.setTextColor(COLOR_TEXT);
+  tft.setCursor(x, y);
+  tft.print(buf);
+
+  lastDrawnWeight = currentWeight;
+}
+
+void updateBottomHUD() {
+  // encoder info dole
+  tft.fillRect(0, 222, 320, 18, COLOR_BG);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setCursor(4, 224);
+  tft.print("ENC: ");
   tft.print(encoderPosition);
 
-  tft.setCursor(0, 56);
+  tft.setCursor(120, 224);
   tft.print("BTN: ");
-  tft.println(lastButtonState == LOW ? "PRESSED" : "released");
-
-  tft.setCursor(0, 70);
-  tft.print(getTimeString());
+  tft.print(lastButtonState == LOW ? "PRESS" : "----");
 }
 
 // ========================
-// Handlery HTTP
+// HTTP handlery
 // ========================
 void handleRoot() {
   server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
@@ -377,7 +541,7 @@ void handleRoot() {
 
 void handleState() {
   updateWeightFromScale();
-  int rssi = 0; // v AP modu nemá moc smysl
+  int rssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
 
   String json = "{";
   json += "\"weight\":" + String(currentWeight, 2) + ",";
@@ -398,7 +562,7 @@ void handleItemPost() {
   }
 }
 
-// nový endpoint: /api_json – pro tebe
+// /api_json – tvoje API
 void handleApiJson() {
   updateWeightFromScale();
 
@@ -420,9 +584,9 @@ void handleNotFound() {
 // ========================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
   Serial.println();
-  Serial.println("Chytra vaha - ESP32S3 AP + Web + LCD + HX711 + enkoder");
+  Serial.println("Chytra vaha - WiFi portal + HUD");
 
   // PINy enkoderu
   pinMode(ENC_SW, INPUT_PULLUP);
@@ -431,48 +595,49 @@ void setup() {
   lastEncA        = digitalRead(ENC_A);
   lastButtonState = digitalRead(ENC_SW);
 
-  // LCD
   // LCD – ST7789 240x320
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
-  
-  // šířka = 240, výška = 320 (nebo naopak podle orientace)
-  // tady inicializujeme nativní rozlišení
   tft.init(240, 320);
-  
-  tft.setRotation(1);          // orientace naležato (320x240)
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextWrap(false);
-  drawBootMessage("Startuji...", nullptr);
-  
-  // pokud bys měl obraz obrácený/barvy negativní, můžeš zkusit:
-  // tft.invertDisplay(true);
+  tft.setRotation(1);      // landscape 320x240
+  tft.fillScreen(COLOR_BG);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setTextSize(1);
+  tft.setCursor(10, 10);
+  tft.println("Startuji...");
 
   // HX711
-  drawBootMessage("HX711 init", nullptr);
+  tft.setCursor(10, 30);
+  tft.println("HX711 init");
   scale.begin(HX711_DOUT, HX711_SCK);
   scale.set_scale(1.0f); // bez kalibrace
   scale.tare();
   delay(200);
 
-  // Start AP
-  drawBootMessage("Startuji AP", AP_SSID);
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(local_ip, gateway, subnet);
-  bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD);
-  if (ok) {
-    Serial.println("AP started");
-    Serial.print("SSID: ");
-    Serial.println(AP_SSID);
-    Serial.print("Password: ");
-    Serial.println(AP_PASSWORD);
-    Serial.print("IP address: ");
-    Serial.println(WiFi.softAPIP());
-  } else {
-    Serial.println("Failed to start AP!");
+  // WiFi portal – konfig domácí WiFi
+  tft.setCursor(10, 50);
+  tft.println("WiFi portal...");
+  WiFi.mode(WIFI_STA);
+  WiFiManager wm;
+  wm.setConfigPortalBlocking(true);
+  bool res = wm.autoConnect("ChytraVaha-Setup");
+
+  if (!res) {
+    tft.setCursor(10, 70);
+    tft.println("WiFi fail, reboot");
+    delay(2000);
+    ESP.restart();
   }
 
+  tft.setCursor(10, 70);
+  tft.print("WiFi OK: ");
+  tft.println(WiFi.localIP());
+
+  // NTP time
+  tft.setCursor(10, 90);
+  tft.println("NTP sync...");
+  configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
+
   // mDNS vaha.local
-  drawBootMessage("mDNS: vaha.local", nullptr);
   if (MDNS.begin("vaha")) {
     MDNS.addService("http", "tcp", 80);
     Serial.println("mDNS responder started: http://vaha.local");
@@ -480,18 +645,21 @@ void setup() {
     Serial.println("Error setting up MDNS responder!");
   }
 
-  // Routes
+  // Web server routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/state", HTTP_GET, handleState);
   server.on("/api/item", HTTP_POST, handleItemPost);
   server.on("/api_json", HTTP_GET, handleApiJson);
   server.onNotFound(handleNotFound);
-
   server.begin();
   Serial.println("HTTP server started");
 
-  // Úvodní hlavní obrazovka
-  drawMainScreen();
+  // HUD – statická část, pak všechen update jen lokálně
+  drawStaticHUD();
+  lastDrawnWeight = 999999.0f;
+  lastWifiLevel   = -1;
+  lastTimeStr     = "";
+  lastDateStr     = "";
 }
 
 // ========================
@@ -503,9 +671,11 @@ void loop() {
   updateEncoder();
   updateWeightFromScale();
 
-  static unsigned long lastDisp = 0;
-  if (millis() - lastDisp > 200) {  // cca 5x za sekundu
-    drawMainScreen();
-    lastDisp = millis();
+  static unsigned long lastHudUpdate = 0;
+  if (millis() - lastHudUpdate > 200) {  // cca 5x za sekundu
+    updateTopBarHUD();
+    updateWeightHUD();
+    updateBottomHUD();
+    lastHudUpdate = millis();
   }
 }
