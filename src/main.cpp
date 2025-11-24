@@ -68,12 +68,14 @@ bool buttonLongPressFired        = false;  // aby se long press nevytvářel ví
 // ========================
 enum UiMode {
   UI_HUD = 0,
-  UI_MENU = 1
+  UI_MENU = 1,
+  UI_MENU_TARE = 2,
+  UI_MENU2 = 3
 };
 
 UiMode uiMode = UI_HUD;
 
-// menu
+// menu (hlavní)
 const int MENU_ITEMS = 3;
 const char* MENU_LABELS[MENU_ITEMS] = {
   "Kalibrace",
@@ -83,6 +85,35 @@ const char* MENU_LABELS[MENU_ITEMS] = {
 
 int  menuIndex    = 0;
 long menuEncStart = 0;   // encoder position při vstupu do menu
+
+// menu TARE (misky/hrnky)
+const int MENU_TARE_ITEMS = 6;
+const char* MENU_TARE_LABELS[MENU_TARE_ITEMS] = {
+  "Zpet",
+  "Mala miska plastova",
+  "Maly hrnecek",
+  "Velky hrnek",
+  "melky talir 1",
+  "melky talir 2"
+};
+
+int menuTareIndex = 0;
+
+// menu2 placeholder
+const int MENU2_ITEMS = 6;
+const char* MENU2_LABELS[MENU2_ITEMS] = {
+  "Zpet",
+  "menu item 1",
+  "menu item 2",
+  "menu item 3",
+  "menu item 4",
+  "menu item 5"
+};
+
+int menu2Index = 0;
+
+// baseline enkodéru pro HUD (pro detekci ±5 kroků)
+long hudEncStart = 0;
 
 // ========================
 // HUD – poslední vykreslené hodnoty
@@ -103,6 +134,10 @@ uint16_t COLOR_TOPBAR1 = 0x0015; // tmavě modrá
 uint16_t COLOR_TOPBAR2 = 0x025F; // světlejší modrá
 uint16_t COLOR_TEXT    = 0xFFFF; // bílá
 uint16_t COLOR_ACCENT  = 0x07E0; // zelená
+
+// barvy pro další menu
+uint16_t COLOR_MENU_TARE_ACCENT = 0xF800; // červená
+uint16_t COLOR_MENU2_ACCENT     = 0xFFE0; // žlutá
 
 // ========================
 // Čas – NTP
@@ -416,7 +451,6 @@ bool checkButtonClicked() {
   return clicked;
 }
 
-
 // ========================
 // HUD – statická část
 // ========================
@@ -666,6 +700,116 @@ void updateMenuSelectionFromEncoder() {
   }
 }
 
+// ---- TARE menu (červené) ----
+
+void drawTareMenuItem(int index, bool selected) {
+  int startY = 40;
+  int lineH  = 24;
+  int y = startY + index * lineH;
+
+  if (selected) {
+    tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_MENU_TARE_ACCENT);
+    tft.setTextColor(COLOR_BG);
+  } else {
+    tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_BG);
+    tft.drawRoundRect(10, y - 2, 300, lineH, 8, COLOR_MENU_TARE_ACCENT);
+    tft.setTextColor(COLOR_TEXT);
+  }
+
+  tft.setTextSize(2);
+  tft.setCursor(20, y + 2);
+  tft.print(MENU_TARE_LABELS[index]);
+}
+
+void drawTareMenuScreen() {
+  tft.fillScreen(COLOR_BG);
+
+  // top bar v červené
+  tft.fillRect(0, 0, 320, 24, COLOR_MENU_TARE_ACCENT);
+  tft.setTextColor(COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(4, 6);
+  tft.print("Nadoba / miska");
+
+  for (int i = 0; i < MENU_TARE_ITEMS; i++) {
+    drawTareMenuItem(i, i == menuTareIndex);
+  }
+
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setCursor(4, 224);
+  tft.print("Otacej, stisk pro potvrzeni");
+}
+
+void updateTareMenuSelectionFromEncoder() {
+  long diff = encoderPosition - menuEncStart;
+  int newIndex = (int)diff;
+
+  if (newIndex < 0) newIndex = 0;
+  if (newIndex >= MENU_TARE_ITEMS) newIndex = MENU_TARE_ITEMS - 1;
+
+  if (newIndex != menuTareIndex) {
+    drawTareMenuItem(menuTareIndex, false);
+    drawTareMenuItem(newIndex, true);
+    menuTareIndex = newIndex;
+  }
+}
+
+// ---- MENU2 (žluté) ----
+
+void drawMenu2Item(int index, bool selected) {
+  int startY = 40;
+  int lineH  = 24;
+  int y = startY + index * lineH;
+
+  if (selected) {
+    tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_MENU2_ACCENT);
+    tft.setTextColor(COLOR_BG);
+  } else {
+    tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_BG);
+    tft.drawRoundRect(10, y - 2, 300, lineH, 8, COLOR_MENU2_ACCENT);
+    tft.setTextColor(COLOR_TEXT);
+  }
+
+  tft.setTextSize(2);
+  tft.setCursor(20, y + 2);
+  tft.print(MENU2_LABELS[index]);
+}
+
+void drawMenu2Screen() {
+  tft.fillScreen(COLOR_BG);
+
+  // top bar ve zluté
+  tft.fillRect(0, 0, 320, 24, COLOR_MENU2_ACCENT);
+  tft.setTextColor(COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(4, 6);
+  tft.print("MENU2");
+
+  for (int i = 0; i < MENU2_ITEMS; i++) {
+    drawMenu2Item(i, i == menu2Index);
+  }
+
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setCursor(4, 224);
+  tft.print("Otacej, stisk pro potvrzeni");
+}
+
+void updateMenu2SelectionFromEncoder() {
+  long diff = encoderPosition - menuEncStart;
+  int newIndex = (int)diff;
+
+  if (newIndex < 0) newIndex = 0;
+  if (newIndex >= MENU2_ITEMS) newIndex = MENU2_ITEMS - 1;
+
+  if (newIndex != menu2Index) {
+    drawMenu2Item(menu2Index, false);
+    drawMenu2Item(newIndex, true);
+    menu2Index = newIndex;
+  }
+}
+
 // ========================
 // TAR – zobrazení
 // ========================
@@ -748,6 +892,7 @@ void enterHudMode() {
   lastDateStr     = "";
   tarActive       = false;
   tarDrawn        = false;
+  hudEncStart     = encoderPosition;
 }
 
 void enterMenuMode() {
@@ -755,6 +900,20 @@ void enterMenuMode() {
   menuEncStart = encoderPosition;
   menuIndex    = 0;
   drawMenuScreen();
+}
+
+void enterTareMenuMode() {
+  uiMode = UI_MENU_TARE;
+  menuEncStart  = encoderPosition;
+  menuTareIndex = 0;
+  drawTareMenuScreen();
+}
+
+void enterMenu2Mode() {
+  uiMode = UI_MENU2;
+  menuEncStart = encoderPosition;
+  menu2Index   = 0;
+  drawMenu2Screen();
 }
 
 void handleMenuSelection() {
@@ -774,6 +933,36 @@ void handleMenuSelection() {
 
   // po potvrzení Kalibrace / Reset zatím zůstaneme v menu
 }
+
+void handleTareMenuSelection() {
+  const char* sel = MENU_TARE_LABELS[menuTareIndex];
+
+  if (strcmp(sel, "Zpet") == 0) {
+    Serial.println("[MENU_TARE] Zpet -> HUD");
+    enterHudMode();
+    return;
+  }
+
+  Serial.print("[MENU_TARE] Vybrano: ");
+  Serial.println(sel);
+  // zatím nic nedělá – jen placeholder do budoucna
+}
+
+
+void handleMenu2Selection() {
+  const char* sel = MENU2_LABELS[menu2Index];
+
+  if (strcmp(sel, "Zpet") == 0) {
+    Serial.println("[MENU2] Zpet -> HUD");
+    enterHudMode();
+    return;
+  }
+
+  Serial.print("[MENU2] Vybrano: ");
+  Serial.println(sel);
+  // zatím nic nedělá – jen placeholder
+}
+
 
 // ========================
 // Setup
@@ -879,6 +1068,20 @@ void loop() {
       // (zatím neděláme scale.tare(), jen vizuál)
     }
 
+    // otoceni enkoderem v HUD -> menu TARE nebo MENU2 (jen když neběží TAR)
+    if (!tarActive) {
+      long diff = encoderPosition - hudEncStart;
+      if (diff >= 5) {
+        Serial.println("[ENC] HUD -> MENU_TARE");
+        enterTareMenuMode();
+        return;  // nevolej v tomto kole HUD kreslení
+      } else if (diff <= -5) {
+        Serial.println("[ENC] HUD -> MENU2");
+        enterMenu2Mode();
+        return;
+      }
+    }
+
     // klik v HUD -> menu (ale jen pokud neběží TAR)
     if (clicked && !tarActive) {
       enterMenuMode();
@@ -902,6 +1105,7 @@ void loop() {
           tarActive = false;
           tarDrawn  = false;
           lastDrawnWeight = 999999.0f; // vynutíme překreslení váhy
+          hudEncStart = encoderPosition; // reset baseline pro otáčení v HUD
         }
       } else {
         updateTopBarHUD();
@@ -921,5 +1125,21 @@ void loop() {
       handleMenuSelection();
     }
     // dlouhý stisk v menu zatím ignorujeme
+
+  } else if (uiMode == UI_MENU_TARE) {
+    updateTareMenuSelectionFromEncoder();
+
+    if (clicked) {
+      handleTareMenuSelection();
+      // zatím v menu zůstáváme
+    }
+
+  } else if (uiMode == UI_MENU2) {
+    updateMenu2SelectionFromEncoder();
+
+    if (clicked) {
+      handleMenu2Selection();
+      // zatím v menu zůstáváme
+    }
   }
 }
