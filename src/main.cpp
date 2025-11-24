@@ -54,6 +54,28 @@ HX711 scale;
 long encoderPosition = 0;
 int  lastEncA        = HIGH;
 bool lastButtonState = HIGH;
+unsigned long lastButtonEventMs = 0;
+
+// ========================
+// UI režimy
+// ========================
+enum UiMode {
+  UI_HUD = 0,
+  UI_MENU = 1
+};
+
+UiMode uiMode = UI_HUD;
+
+// menu
+const int MENU_ITEMS = 3;
+const char* MENU_LABELS[MENU_ITEMS] = {
+  "Kalibrace",
+  "Resetovat WiFi",
+  "Zpet"
+};
+
+int  menuIndex    = 0;
+long menuEncStart = 0;   // encoder position při vstupu do menu
 
 // ========================
 // HUD – poslední vykreslené hodnoty
@@ -336,11 +358,29 @@ void updateEncoder() {
     }
     lastEncA = a;
   }
+}
 
-  bool btn = digitalRead(ENC_SW);
-  if (btn != lastButtonState) {
-    lastButtonState = btn;
+// ========================
+// Button – detekce krátkého stisku
+// ========================
+bool checkButtonClicked() {
+  bool cur = digitalRead(ENC_SW);
+  unsigned long now = millis();
+  bool clicked = false;
+
+  if (cur != lastButtonState) {
+    // jednoduchý debounce
+    if (now - lastButtonEventMs > 30) {
+      lastButtonEventMs = now;
+      if (lastButtonState == HIGH && cur == LOW) {
+        // hrana dolů
+        clicked = true;
+      }
+      lastButtonState = cur;
+    }
   }
+
+  return clicked;
 }
 
 // ========================
@@ -379,7 +419,6 @@ void drawStaticHUD() {
   tft.setCursor(4, 6);
   tft.print("Chytra vaha");
 
-  // box na váhu uprostřed (s "glow" okrajem)
   int boxX = 20;
   int boxY = 60;
   int boxW = 280;
@@ -430,7 +469,7 @@ void drawWifiIcon(int level) {
     int barH = 4 + i * 3;
     int bx = x + i * (barW + barSpacing);
     int by = 20 - barH;
-    uint16_t col = (i < level) ? COLOR_ACCENT : 0x4208; // tlumená šedá
+    uint16_t col = (i < level) ? COLOR_ACCENT : 0x4208;
     tft.fillRect(bx, by, barW, barH, col);
   }
 }
@@ -533,6 +572,60 @@ void updateBottomHUD() {
 }
 
 // ========================
+// MENU – kreslení
+// ========================
+void drawMenuScreen() {
+  tft.fillScreen(COLOR_BG);
+
+  // top bar znovu použijeme jako header menu
+  drawTopBarGradient();
+  tft.setTextColor(COLOR_TEXT);
+  tft.setTextSize(1);
+  tft.setCursor(4, 6);
+  tft.print("Menu");
+
+  // položky menu
+  int startY = 40;
+  int lineH  = 24;
+
+  for (int i = 0; i < MENU_ITEMS; i++) {
+    int y = startY + i * lineH;
+
+    if (i == menuIndex) {
+      // highlight + glow
+      tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_TOPBAR2);
+      tft.setTextColor(COLOR_BG);
+    } else {
+      tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_BG);
+      tft.drawRoundRect(10, y - 2, 300, lineH, 8, COLOR_TOPBAR2);
+      tft.setTextColor(COLOR_TEXT);
+    }
+
+    tft.setTextSize(2);
+    tft.setCursor(20, y + 2);
+    tft.print(MENU_LABELS[i]);
+  }
+
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setCursor(4, 224);
+  tft.print("Otacej pro vyber, stisk pro potvrzeni");
+}
+
+void updateMenuSelectionFromEncoder() {
+  long diff = encoderPosition - menuEncStart;
+  int newIndex = (int)diff;
+
+  if (newIndex < 0) newIndex = 0;
+  if (newIndex >= MENU_ITEMS) newIndex = MENU_ITEMS - 1;
+
+  if (newIndex != menuIndex) {
+    menuIndex = newIndex;
+    drawMenuScreen();
+  }
+}
+
+// ========================
 // HTTP handlery
 // ========================
 void handleRoot() {
@@ -580,13 +673,50 @@ void handleNotFound() {
 }
 
 // ========================
+// Přepínání UI módů
+// ========================
+void enterHudMode() {
+  uiMode = UI_HUD;
+  drawStaticHUD();
+  lastDrawnWeight = 999999.0f;
+  lastWifiLevel   = -1;
+  lastTimeStr     = "";
+  lastDateStr     = "";
+}
+
+void enterMenuMode() {
+  uiMode = UI_MENU;
+  menuEncStart = encoderPosition;
+  menuIndex    = 0;
+  drawMenuScreen();
+}
+
+void handleMenuSelection() {
+  const char* sel = MENU_LABELS[menuIndex];
+
+  if (strcmp(sel, "Kalibrace") == 0) {
+    Serial.println("[MENU] Kalibrace (zatim nic nedelej)");
+    // tady později uděláme wizard kalibrace
+  } else if (strcmp(sel, "Resetovat WiFi") == 0) {
+    Serial.println("[MENU] Resetovat WiFi (zatim nic nedelej)");
+    // tady potom dáme WiFiManager reset
+  } else if (strcmp(sel, "Zpet") == 0) {
+    Serial.println("[MENU] Zpet -> HUD");
+    enterHudMode();
+    return;
+  }
+
+  // po potvrzení Kalibrace / Reset zatím zůstaneme v menu
+}
+
+// ========================
 // Setup
 // ========================
 void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println();
-  Serial.println("Chytra vaha - WiFi portal + HUD");
+  Serial.println("Chytra vaha - WiFi portal + HUD + menu");
 
   // PINy enkoderu
   pinMode(ENC_SW, INPUT_PULLUP);
@@ -654,12 +784,7 @@ void setup() {
   server.begin();
   Serial.println("HTTP server started");
 
-  // HUD – statická část, pak všechen update jen lokálně
-  drawStaticHUD();
-  lastDrawnWeight = 999999.0f;
-  lastWifiLevel   = -1;
-  lastTimeStr     = "";
-  lastDateStr     = "";
+  enterHudMode();
 }
 
 // ========================
@@ -671,11 +796,29 @@ void loop() {
   updateEncoder();
   updateWeightFromScale();
 
-  static unsigned long lastHudUpdate = 0;
-  if (millis() - lastHudUpdate > 200) {  // cca 5x za sekundu
-    updateTopBarHUD();
-    updateWeightHUD();
-    updateBottomHUD();
-    lastHudUpdate = millis();
+  bool clicked = checkButtonClicked();
+
+  if (uiMode == UI_HUD) {
+    // klik v HUD -> menu
+    if (clicked) {
+      enterMenuMode();
+    }
+
+    static unsigned long lastHudUpdate = 0;
+    if (millis() - lastHudUpdate > 200) {
+      updateTopBarHUD();
+      updateWeightHUD();
+      updateBottomHUD();
+      lastHudUpdate = millis();
+    }
+
+  } else if (uiMode == UI_MENU) {
+    // encoder posouvá položky
+    updateMenuSelectionFromEncoder();
+
+    // klik v menu -> potvrzení
+    if (clicked) {
+      handleMenuSelection();
+    }
   }
 }
