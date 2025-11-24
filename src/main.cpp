@@ -1009,7 +1009,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFiManager wm;
   wm.setConfigPortalBlocking(true);
-  bool res = wm.autoConnect("ChytraVaha-Setup");
+  bool res = wm.autoConnect("Smart_scale SETUP", "calories");
 
   if (!res) {
     tft.setCursor(10, 70);
