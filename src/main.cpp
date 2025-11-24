@@ -571,6 +571,28 @@ void updateBottomHUD() {
   tft.print(lastButtonState == LOW ? "PRESS" : "----");
 }
 
+// vykreslí jednu položku menu (jen daný řádek)
+void drawMenuItem(int index, bool selected) {
+  int startY = 40;
+  int lineH  = 24;
+  int y = startY + index * lineH;
+
+  if (selected) {
+    // highlight + glow
+    tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_TOPBAR2);
+    tft.setTextColor(COLOR_BG);
+  } else {
+    tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_BG);
+    tft.drawRoundRect(10, y - 2, 300, lineH, 8, COLOR_TOPBAR2);
+    tft.setTextColor(COLOR_TEXT);
+  }
+
+  tft.setTextSize(2);
+  tft.setCursor(20, y + 2);
+  tft.print(MENU_LABELS[index]);
+}
+
+
 // ========================
 // MENU – kreslení
 // ========================
@@ -584,26 +606,9 @@ void drawMenuScreen() {
   tft.setCursor(4, 6);
   tft.print("Menu");
 
-  // položky menu
-  int startY = 40;
-  int lineH  = 24;
-
+  // položky menu – vykreslíme všechny jednou
   for (int i = 0; i < MENU_ITEMS; i++) {
-    int y = startY + i * lineH;
-
-    if (i == menuIndex) {
-      // highlight + glow
-      tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_TOPBAR2);
-      tft.setTextColor(COLOR_BG);
-    } else {
-      tft.fillRoundRect(10, y - 2, 300, lineH, 8, COLOR_BG);
-      tft.drawRoundRect(10, y - 2, 300, lineH, 8, COLOR_TOPBAR2);
-      tft.setTextColor(COLOR_TEXT);
-    }
-
-    tft.setTextSize(2);
-    tft.setCursor(20, y + 2);
-    tft.print(MENU_LABELS[i]);
+    drawMenuItem(i, i == menuIndex);
   }
 
   tft.setTextSize(1);
@@ -620,10 +625,15 @@ void updateMenuSelectionFromEncoder() {
   if (newIndex >= MENU_ITEMS) newIndex = MENU_ITEMS - 1;
 
   if (newIndex != menuIndex) {
+    // zrus highlight staré položky
+    drawMenuItem(menuIndex, false);
+    // zvýrazni novou položku
+    drawMenuItem(newIndex, true);
+
     menuIndex = newIndex;
-    drawMenuScreen();
   }
 }
+
 
 // ========================
 // HTTP handlery
