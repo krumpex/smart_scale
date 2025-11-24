@@ -56,6 +56,13 @@ int  lastEncA        = HIGH;
 bool lastButtonState = HIGH;
 unsigned long lastButtonEventMs = 0;
 
+// dlouhý stisk
+const unsigned long LONG_PRESS_MS = 1500;
+unsigned long buttonPressStartMs  = 0;
+bool buttonLongPressEvent         = false;
+bool buttonLongPressFired        = false;  // aby se long press nevytvářel víckrát během jednoho stisku
+
+
 // ========================
 // UI režimy
 // ========================
@@ -84,6 +91,11 @@ float lastDrawnWeight = 999999.0f;
 int   lastWifiLevel   = -1;
 String lastTimeStr    = "";
 String lastDateStr    = "";
+
+// TAR stav
+bool tarActive        = false;
+bool tarDrawn         = false;
+unsigned long tarStartMs = 0;
 
 // barvy
 uint16_t COLOR_BG      = 0x0000; // černá
@@ -372,16 +384,38 @@ bool checkButtonClicked() {
     // jednoduchý debounce
     if (now - lastButtonEventMs > 30) {
       lastButtonEventMs = now;
+
+      // hrana dolů = začátek stisku
       if (lastButtonState == HIGH && cur == LOW) {
-        // hrana dolů
-        clicked = true;
+        buttonPressStartMs   = now;
+        buttonLongPressFired = false;
       }
+      // hrana nahoru = konec stisku
+      else if (lastButtonState == LOW && cur == HIGH) {
+        unsigned long pressDuration = now - buttonPressStartMs;
+        // pokud jsme ještě nevystřelili long press, bereme to jako krátký klik
+        if (!buttonLongPressFired && pressDuration < LONG_PRESS_MS) {
+          clicked = true;
+        }
+        // když už long press proběhl, po puštění se nic dalšího neděje
+      }
+
       lastButtonState = cur;
+    }
+  }
+
+  // long press detekujeme během držení (tlačítko je LOW)
+  if (lastButtonState == LOW && !buttonLongPressFired) {
+    unsigned long pressDuration = now - buttonPressStartMs;
+    if (pressDuration >= LONG_PRESS_MS) {
+      buttonLongPressEvent = true;
+      buttonLongPressFired = true;
     }
   }
 
   return clicked;
 }
+
 
 // ========================
 // HUD – statická část
@@ -606,7 +640,7 @@ void drawMenuScreen() {
   tft.setCursor(4, 6);
   tft.print("Menu");
 
-  // položky menu – vykreslíme všechny jednou
+  // položky menu
   for (int i = 0; i < MENU_ITEMS; i++) {
     drawMenuItem(i, i == menuIndex);
   }
@@ -625,15 +659,35 @@ void updateMenuSelectionFromEncoder() {
   if (newIndex >= MENU_ITEMS) newIndex = MENU_ITEMS - 1;
 
   if (newIndex != menuIndex) {
-    // zrus highlight staré položky
+    // přepni jen řádky, ne celé menu
     drawMenuItem(menuIndex, false);
-    // zvýrazni novou položku
     drawMenuItem(newIndex, true);
-
     menuIndex = newIndex;
   }
 }
 
+// ========================
+// TAR – zobrazení
+// ========================
+void drawTarMessage() {
+  eraseWeightArea();
+
+  tft.setTextSize(4);
+  tft.setTextColor(COLOR_ACCENT);
+
+  const char* txt = "TAR";
+  int len = strlen(txt);
+  int charW = 6 * 4; // 6 px * size4
+  int totalW = len * charW;
+
+  int boxX = 20;
+  int boxW = 280;
+  int x = boxX + (boxW - totalW) / 2;
+  int y = 90;
+
+  tft.setCursor(x, y);
+  tft.print(txt);
+}
 
 // ========================
 // HTTP handlery
@@ -692,6 +746,8 @@ void enterHudMode() {
   lastWifiLevel   = -1;
   lastTimeStr     = "";
   lastDateStr     = "";
+  tarActive       = false;
+  tarDrawn        = false;
 }
 
 void enterMenuMode() {
@@ -807,18 +863,52 @@ void loop() {
   updateWeightFromScale();
 
   bool clicked = checkButtonClicked();
+  bool longPress = false;
+  if (buttonLongPressEvent) {
+    longPress = true;
+    buttonLongPressEvent = false;
+  }
 
   if (uiMode == UI_HUD) {
-    // klik v HUD -> menu
-    if (clicked) {
-      enterMenuMode();
+    // dlouhý stisk v HUD -> TAR overlay
+    if (longPress) {
+      Serial.println("[BTN] Long press -> TAR");
+      tarActive   = true;
+      tarDrawn    = false;
+      tarStartMs  = millis();
+      // (zatím neděláme scale.tare(), jen vizuál)
     }
+
+    // klik v HUD -> menu (ale jen pokud neběží TAR)
+    if (clicked && !tarActive) {
+      enterMenuMode();
+      return;  // z tohoto průchodu loopu už NIC dalšího nekresli (zabráníme jednorázovému překreslení HUDu přes menu)
+    }
+  
 
     static unsigned long lastHudUpdate = 0;
     if (millis() - lastHudUpdate > 200) {
-      updateTopBarHUD();
-      updateWeightHUD();
-      updateBottomHUD();
+      // pokud je aktivní TAR, zobraz hlášku 3s místo váhy
+      if (tarActive) {
+        updateTopBarHUD();
+        updateBottomHUD();
+
+        if (!tarDrawn) {
+          drawTarMessage();
+          tarDrawn = true;
+        }
+
+        if (millis() - tarStartMs >= 3000) {
+          tarActive = false;
+          tarDrawn  = false;
+          lastDrawnWeight = 999999.0f; // vynutíme překreslení váhy
+        }
+      } else {
+        updateTopBarHUD();
+        updateWeightHUD();
+        updateBottomHUD();
+      }
+
       lastHudUpdate = millis();
     }
 
@@ -830,5 +920,6 @@ void loop() {
     if (clicked) {
       handleMenuSelection();
     }
+    // dlouhý stisk v menu zatím ignorujeme
   }
 }
