@@ -114,6 +114,8 @@ int menu2Index = 0;
 
 // baseline enkodéru pro HUD (pro detekci ±5 kroků)
 long hudEncStart = 0;
+unsigned long lastHudEncoderMoveMs = 0;
+long hudEncLastPos = 0;
 
 // ========================
 // HUD – poslední vykreslené hodnoty
@@ -893,7 +895,10 @@ void enterHudMode() {
   tarActive       = false;
   tarDrawn        = false;
   hudEncStart     = encoderPosition;
+  lastHudEncoderMoveMs = millis();
+  hudEncLastPos        = encoderPosition;
 }
+
 
 void enterMenuMode() {
   uiMode = UI_MENU;
@@ -1069,7 +1074,18 @@ void loop() {
     }
 
     // otoceni enkoderem v HUD -> menu TARE nebo MENU2 (jen když neběží TAR)
+    // otoceni enkoderem v HUD -> menu TARE nebo MENU2 (jen když neběží TAR)
     if (!tarActive) {
+      // sledování pohybu enkodéru a 2s timeout na „nasbírané“ kroky
+      if (encoderPosition != hudEncLastPos) {
+        hudEncLastPos        = encoderPosition;
+        lastHudEncoderMoveMs = millis();
+      } else {
+        if (millis() - lastHudEncoderMoveMs > 2000) { // 2 s bez pohybu
+          hudEncStart = encoderPosition;              // reset baseline
+        }
+      }
+
       long diff = encoderPosition - hudEncStart;
       if (diff >= 5) {
         Serial.println("[ENC] HUD -> MENU_TARE");
@@ -1081,6 +1097,7 @@ void loop() {
         return;
       }
     }
+
 
     // klik v HUD -> menu (ale jen pokud neběží TAR)
     if (clicked && !tarActive) {
@@ -1105,8 +1122,10 @@ void loop() {
           tarActive = false;
           tarDrawn  = false;
           lastDrawnWeight = 999999.0f; // vynutíme překreslení váhy
-          hudEncStart = encoderPosition; // reset baseline pro otáčení v HUD
-        }
+          hudEncStart          = encoderPosition; // reset baseline pro otáčení v HUD
+          lastHudEncoderMoveMs = millis();
+          hudEncLastPos        = encoderPosition;
+        }        
       } else {
         updateTopBarHUD();
         updateWeightHUD();
