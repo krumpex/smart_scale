@@ -70,7 +70,8 @@ enum UiMode {
   UI_HUD = 0,
   UI_MENU = 1,
   UI_MENU_TARE = 2,
-  UI_MENU2 = 3
+  UI_MENU2 = 3,
+  UI_CALIB = 4
 };
 
 UiMode uiMode = UI_HUD;
@@ -111,6 +112,17 @@ const char* MENU2_LABELS[MENU2_ITEMS] = {
 };
 
 int menu2Index = 0;
+
+// kalibrace
+const int CAL_STEPS = 3;
+const float CAL_TARGET_WEIGHTS[CAL_STEPS] = { 100.0f, 500.0f, 1000.0f };
+float calibrationRaw[CAL_STEPS];
+bool  calibrationCaptured[CAL_STEPS];
+int   calibrationStep = 0;
+bool  calibrationComputed = false;
+float calibrationScaleFactor = 1.0f;
+String calibrationMessage = "";
+float lastCalibrationPreview = 999999.0f;
 
 // baseline enkodéru pro HUD (pro detekci ±5 kroků)
 long hudEncStart = 0;
@@ -812,6 +824,154 @@ void updateMenu2SelectionFromEncoder() {
   }
 }
 
+// ---- Kalibrace HX711 ----
+
+// prototypy, protože enterHudMode je definované níž
+void enterHudMode();
+
+void resetCalibrationState() {
+  calibrationStep = 0;
+  calibrationComputed = false;
+  calibrationScaleFactor = 1.0f;
+  calibrationMessage = "";
+  lastCalibrationPreview = 999999.0f;
+  for (int i = 0; i < CAL_STEPS; i++) {
+    calibrationRaw[i] = 0.0f;
+    calibrationCaptured[i] = false;
+  }
+}
+
+void drawCalibrationScreen() {
+  tft.fillScreen(COLOR_BG);
+  tft.fillRect(0, 0, 320, 24, COLOR_ACCENT);
+  tft.setTextColor(COLOR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(4, 6);
+  tft.print("Kalibrace");
+
+  tft.setTextColor(COLOR_TEXT);
+  tft.setTextSize(2);
+
+  if (!calibrationComputed) {
+    tft.setCursor(10, 40);
+    tft.print("Krok ");
+    tft.print(calibrationStep + 1);
+    tft.print("/");
+    tft.print(CAL_STEPS);
+    tft.setCursor(10, 66);
+    tft.print("Poloz ");
+    tft.print((int)CAL_TARGET_WEIGHTS[calibrationStep]);
+    tft.print(" g");
+    tft.setCursor(10, 92);
+    tft.print("a stiskni tlacitko");
+  } else {
+    tft.setCursor(10, 40);
+    tft.print("Hotovo");
+    tft.setCursor(10, 66);
+    tft.print("Scale: ");
+    tft.print(calibrationScaleFactor, 1);
+    tft.setTextSize(1);
+    tft.setCursor(10, 90);
+    tft.print("Sundej zatez a klikni pro ulozeni");
+  }
+
+  // live preview area (maze se zde, prekresluje se v updateCalibrationPreviewWeight)
+  tft.fillRect(10, 112, 300, 14, COLOR_BG);
+
+  tft.setTextSize(1);
+  int y = 130;
+  for (int i = 0; i < CAL_STEPS; i++) {
+    tft.setCursor(10, y + i * 16);
+    tft.print((int)CAL_TARGET_WEIGHTS[i]);
+    tft.print(" g: ");
+    if (calibrationCaptured[i]) {
+      tft.print("OK (raw ");
+      tft.print((long)calibrationRaw[i]);
+      tft.print(")");
+    } else {
+      tft.print("cekam");
+    }
+  }
+
+  tft.setCursor(10, 200);
+  tft.print("Klik: ulozit | Dlouhy: zrusit");
+
+  if (calibrationMessage.length() > 0) {
+    tft.setCursor(10, 216);
+    tft.print(calibrationMessage);
+  }
+}
+
+void updateCalibrationPreviewWeight() {
+  if (calibrationComputed) return;
+
+  if (fabs(currentWeight - lastCalibrationPreview) < 0.1f) {
+    return;
+  }
+  lastCalibrationPreview = currentWeight;
+
+  tft.fillRect(10, 112, 300, 14, COLOR_BG);
+  tft.setCursor(10, 112);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TEXT);
+  tft.print("Aktualni cteni: ");
+  tft.print(currentWeight, 1);
+}
+
+void enterCalibrationMode() {
+  uiMode = UI_CALIB;
+  resetCalibrationState();
+  scale.set_scale(1.0f); // bereme syrove hodnoty
+  scale.tare();          // nulovani pred prvnim krokem
+  calibrationMessage = "Prazdna vaha vynulovana";
+  drawCalibrationScreen();
+}
+
+void handleCalibrationClick() {
+  if (calibrationComputed) {
+    Serial.println("[CAL] Ukladam scale a vracim HUD");
+    scale.set_scale(calibrationScaleFactor);
+    scale.tare();
+    enterHudMode();
+    return;
+  }
+
+  if (calibrationStep >= CAL_STEPS) {
+    return;
+  }
+
+  float raw = scale.get_value(10);  // prumer 10 mereni
+  calibrationRaw[calibrationStep] = raw;
+  calibrationCaptured[calibrationStep] = true;
+  calibrationMessage = "Ulozeno ";
+  calibrationMessage += (int)CAL_TARGET_WEIGHTS[calibrationStep];
+  calibrationMessage += " g";
+
+  calibrationStep++;
+
+  if (calibrationStep >= CAL_STEPS) {
+    float sumRW = 0.0f;
+    float sumW2 = 0.0f;
+    for (int i = 0; i < CAL_STEPS; i++) {
+      sumRW += calibrationRaw[i] * CAL_TARGET_WEIGHTS[i];
+      sumW2 += CAL_TARGET_WEIGHTS[i] * CAL_TARGET_WEIGHTS[i];
+    }
+
+    if (sumW2 > 0.0f) {
+      calibrationScaleFactor = sumRW / sumW2;
+    } else {
+      calibrationScaleFactor = 1.0f;
+    }
+
+    scale.set_scale(calibrationScaleFactor);
+    calibrationComputed = true;
+    calibrationMessage = "Sundej zatez, klik pro ulozeni";
+    lastCalibrationPreview = 999999.0f;
+  }
+
+  drawCalibrationScreen();
+}
+
 // ========================
 // TAR – zobrazení
 // ========================
@@ -925,8 +1085,9 @@ void handleMenuSelection() {
   const char* sel = MENU_LABELS[menuIndex];
 
   if (strcmp(sel, "Kalibrace") == 0) {
-    Serial.println("[MENU] Kalibrace (zatim nic nedelej)");
-    // tady později uděláme wizard kalibrace
+    Serial.println("[MENU] Kalibrace -> wizard");
+    enterCalibrationMode();
+    return;
   } else if (strcmp(sel, "Resetovat WiFi") == 0) {
     Serial.println("[MENU] Resetovat WiFi (zatim nic nedelej)");
     // tady potom dáme WiFiManager reset
@@ -1144,6 +1305,19 @@ void loop() {
       handleMenuSelection();
     }
     // dlouhý stisk v menu zatím ignorujeme
+
+  } else if (uiMode == UI_CALIB) {
+    if (longPress) {
+      Serial.println("[CAL] Zruseno dlouhym stiskem");
+      enterHudMode();
+      return;
+    }
+
+    updateCalibrationPreviewWeight();
+
+    if (clicked) {
+      handleCalibrationClick();
+    }
 
   } else if (uiMode == UI_MENU_TARE) {
     updateTareMenuSelectionFromEncoder();
